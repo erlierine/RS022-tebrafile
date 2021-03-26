@@ -1,12 +1,35 @@
 #include "mainwindow.h"
 #include "ui_mainwindow.h"
 #include <iostream>
+#include <QTreeView>
 
 MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent)
     , ui(new Ui::MainWindow)
 {
     ui->setupUi(this);
+
+    fileList = ui->treeWidget;
+    fileList->setEnabled(false);
+    fileList->setRootIsDecorated(true);
+    fileList->header()->setStretchLastSection(true);
+
+    fileList->setColumnCount(5);
+    fileList->setHeaderLabels(QStringList() << "Name"
+                                    << "Size"
+                                    << "Owner"
+                                    << "Group"
+                                    << "Last modified");
+    QObject::connect(fileList, &QTreeWidget::itemDoubleClicked, this, &MainWindow::cdToFolder);
+    fileList->clear();
+    isDir.clear();
+    currentPath.clear();
+
+    QTreeWidgetItem *widgetItem = new QTreeWidgetItem();
+    widgetItem->setText(0, "..");
+    widgetItem->setDisabled(true);
+    fileList->addTopLevelItem(widgetItem);
+
     manager = new QNetworkAccessManager(this);
 }
 
@@ -15,8 +38,6 @@ void MainWindow::ftpDone(bool error)
 {
     if (error) {
         std::cerr << "Error: " << qPrintable(ftpClient->errorString()) << std::endl;
-        ui->loginMsg->setText(ftpClient->errorString());
-        ui->loginMsg->setStyleSheet("QLabel {color : red}");
         ftpClient->disconnect();
     }
 }
@@ -28,16 +49,8 @@ MainWindow::~MainWindow()
     delete ui;
 }
 
-
-void MainWindow::addToList(const QUrlInfo& file)
-{
-    fileList.push_back(file.name());
-    qDebug() << file.name();
-}
-
 void MainWindow::on_connectButton_clicked()
 {
-
     ftpAdrress = ui->serverNameField->text();
     connectToServer();
 }
@@ -68,7 +81,16 @@ void MainWindow::on_disconnectButton_clicked()
 {
     ftpClient->close();
     ftpClient->abort();
-    ui->loginMsg->setText("You are disconnected");
+
+    fileList->clear();
+    isDir.clear();
+    currentPath.clear();
+
+    QTreeWidgetItem *widgetItem = new QTreeWidgetItem();
+    widgetItem->setText(0, "..");
+    fileList->addTopLevelItem(widgetItem);
+    fileList->setEnabled(false);
+
 }
 
 void MainWindow::showLoginDialog(int state)
@@ -80,7 +102,6 @@ void MainWindow::showLoginDialog(int state)
         QObject::connect(diag, &InputDialog::credentialsCaptured, this, &MainWindow::login);
         diag->exec();
     } else if (state == QFtp::Unconnected and ftpClient->currentCommand() != QFtp::Close){
-        std::cerr << "ELSE ERROR: " << ftpClient->error() << std::endl;
         QMessageBox errBox;
         errBox.setWindowTitle("Connection error");
         errBox.setText(ftpClient->errorString());
@@ -94,9 +115,164 @@ void MainWindow::showLoginDialog(int state)
 
 void MainWindow::afterLogin(int state)
 {
+    currentPath = QString("~");
     if (state == QFtp::LoggedIn and ftpClient->currentCommand() == QFtp::Login) {
-        QObject::connect(ftpClient, &QFtp::listInfo, this, &MainWindow::addToList);
-        ftpClient->list("./");
-        ui->loginMsg->clear();
+        listFiles(currentPath);
+        logged = true;
     }
+}
+
+void MainWindow::listFiles(const QString& fileName)
+{
+    QObject::connect(ftpClient, &QFtp::listInfo, this, &MainWindow::addToList);
+    QObject::connect(ftpClient, &QFtp::done, this, &MainWindow::listDone);
+    ftpClient->list(fileName);
+}
+
+void MainWindow::addToList(const QUrlInfo& file)
+{
+    QTreeWidgetItem *widgetItem = new QTreeWidgetItem();
+
+    widgetItem->setText(0, file.name());
+    widgetItem->setText(1, QString::number(file.size()));
+    widgetItem->setText(2, file.owner());
+    widgetItem->setText(3, file.group());
+    widgetItem->setText(4, file.lastModified().toString("dd/mm/yyyy"));
+
+    QIcon* folderIcon = new QIcon("../icons/directory.png");
+    QIcon* fileIcon = new QIcon("../icons/file.png");
+    QIcon* icon(file.isDir() ? folderIcon : fileIcon);
+    widgetItem->setIcon(0, *icon);
+
+    isDir.insert(file.name(), file.isDir());
+
+    fileList->addTopLevelItem(widgetItem);
+
+    // ako je item prvi postavi ga za trenutno selektovani
+    if (!fileList->currentItem()) {
+        fileList->setCurrentItem(fileList->topLevelItem(1));
+        fileList->setEnabled(true);
+    }
+}
+
+void MainWindow::cdToFolder(QTreeWidgetItem *widgetItem, int column)
+{
+    // ako je korisnik izabrao da ide nazad
+    if(widgetItem == fileList->topLevelItem(0)) {
+        leaveFolder();
+    } else {
+        QString name = widgetItem->text(0);
+        if(isDir.value(name)) {
+            currentPath += '/';
+            currentPath += name;
+
+            std::cout << currentPath.toStdString() << std::endl;
+
+            fileList->clear();
+            isDir.clear();
+
+            QTreeWidgetItem *widgetItem = new QTreeWidgetItem();
+            widgetItem->setText(0, "..");
+            fileList->addTopLevelItem(widgetItem);
+
+            ftpClient->cd(name);
+            ftpClient->list();
+        }
+    }
+}
+
+void MainWindow::leaveFolder()
+{
+      fileList->clear();
+      isDir.clear();
+
+      QTreeWidgetItem *widgetItem = new QTreeWidgetItem();
+      widgetItem->setText(0, "..");
+      fileList->addTopLevelItem(widgetItem);
+
+      currentPath = currentPath.left(currentPath.lastIndexOf('/'));
+      std::cout << currentPath.toStdString() << std::endl;
+      if(currentPath.isEmpty()) {
+          currentPath = "~";
+          ftpClient->cd("~");
+          fileList->topLevelItem(0)->setDisabled(true);
+      } else {
+          ftpClient->cd(currentPath);
+      }
+      ftpClient->list();
+
+}
+
+void MainWindow::listDone(bool error)
+{
+    if (error) {
+        std::cerr << "Error: " << qPrintable(ftpClient->errorString()) << std::endl;
+    }
+}
+
+
+void MainWindow::on_openButton_clicked()
+{
+    const auto filenames = QFileDialog::getOpenFileNames(
+                this,
+                "Select files",
+                QDir::homePath());
+    ui->uploadFileInput->setText(filenames.join(';'));
+}
+
+void MainWindow::on_uploadButton_clicked()
+{
+
+    if (logged) {
+        ftpClient->rawCommand("PWD");
+        QObject::connect(ftpClient, &QFtp::rawCommandReply,
+                         this, &MainWindow::pwdHandler);
+    }
+    if (ui->uploadFileInput->text().trimmed().length() == 0)
+        QMessageBox::critical(this, "Alert", "Files did not selected.");
+    else if (!logged)
+        QMessageBox::critical(this, "Alert", "You are not connected.");
+    else {
+        const auto listOfFiles = ui->uploadFileInput->text().split(";");
+        foreach (const auto file, listOfFiles) {
+            const auto namesParts = file.split("/");
+            QFile readFile(file);
+            readFile.open(QIODevice::ReadOnly);
+            const QByteArray buffer = readFile.readAll();
+            int putID = ftpClient->put(buffer, namesParts.last(), QFtp::Binary);
+            fileList->setEnabled(false);
+            QObject::connect(ftpClient, &QFtp::dataTransferProgress,
+                             this, &MainWindow::progressBarSlot);
+            QObject::connect(ftpClient, &QFtp::commandFinished,
+                             this, &MainWindow::uploadFinishHandler);
+        }
+    }
+}
+
+
+
+void MainWindow::progressBarSlot(qint64 done, qint64 total)
+{
+
+    ui->uploadProgressBar->setValue(100*done/total);
+    if(done == total)
+        fileList->setEnabled(true);
+}
+
+void MainWindow::uploadFinishHandler(int id, bool error)
+{
+    if (error) {
+        fileList->setEnabled(true);
+        std::cout << ftpClient->errorString().toUtf8().data() << std::endl;
+        ftpClient->rawCommand("PWD");
+
+    }
+}
+
+void MainWindow::pwdHandler(int replyCode, const QString& detail)
+{
+    qDebug() << "-----------------------";
+    qDebug() << detail;
+    qDebug() << "-----------------------";
+
 }
